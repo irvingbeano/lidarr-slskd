@@ -244,46 +244,62 @@ def search_and_grab(lidarr_id, artist, album):
     failed_sources = get_failed_sources(lidarr_id)
     if failed_sources:
         log.info("Excluding previously failed sources: %s", failed_sources)
-    candidates = []
+    lossy_candidates = []
+    flac_candidates  = []
     for resp in responses:
         username = resp.get("username", "")
         if username in failed_sources:
             continue
-        speed    = resp.get("uploadSpeed", 0)
-        qlen     = resp.get("queueLength", 9999)
-        mp3s = [
-            f for f in resp.get("files", [])
-            if f.get("filename", "").lower().endswith(".mp3")
+        speed = resp.get("uploadSpeed", 0)
+        qlen  = resp.get("queueLength", 9999)
+        files = resp.get("files", [])
+        # MP3 / M4A pass
+        lossy = [
+            f for f in files
+            if f.get("filename", "").lower().endswith((".mp3", ".m4a"))
             and (al in f.get("filename", "").lower() or ar in f.get("filename", "").lower())
         ]
-        if len(mp3s) < min_tracks:
+        if len(lossy) >= min_tracks:
+            brs   = [bitrate(f.get("attributes", [])) for f in lossy]
+            avg   = sum(brs) / len(brs) if brs else 0
+            is320 = avg >= 310 or any(b == 320 for b in brs)
+            lossy_candidates.append((is320, avg, speed, -qlen, username, lossy))
             continue
-        brs   = [bitrate(f.get("attributes", [])) for f in mp3s]
-        avg   = sum(brs) / len(brs) if brs else 0
-        is320 = avg >= 310 or any(b == 320 for b in brs)
-        candidates.append((is320, avg, speed, -qlen, username, mp3s))
+        # FLAC fallback pass
+        flacs = [
+            f for f in files
+            if f.get("filename", "").lower().endswith(".flac")
+            and (al in f.get("filename", "").lower() or ar in f.get("filename", "").lower())
+        ]
+        if len(flacs) >= min_tracks:
+            total_size = sum(f.get("size", 0) for f in flacs)
+            flac_candidates.append((total_size, -speed, qlen, username, flacs))
 
-    if not candidates:
+    if lossy_candidates:
+        lossy_candidates.sort(key=lambda c: (c[0], c[1], c[2], c[3]), reverse=True)
+        candidates = [(c[4], c[5], "320kbps" if c[0] else f"{int(c[1])}kbps") for c in lossy_candidates]
+    elif flac_candidates:
+        flac_candidates.sort()  # smallest total size first
+        candidates = [(c[3], c[4], "flac") for c in flac_candidates]
+        log.info("No MP3/M4A found — falling back to FLAC (%d sources) for %s – %s",
+                 len(flac_candidates), artist, album)
+    else:
         log.warning("No source with %d+ tracks found for %r", min_tracks, query)
         set_grab(lidarr_id, artist, album, "failed")
         return
 
-    candidates.sort(key=lambda c: (c[0], c[1], c[2], c[3]), reverse=True)
-
-    for is320, avg, speed, _, username, mp3s in candidates[:8]:
-        payload = [{"filename": f["filename"], "size": f.get("size", 0)} for f in mp3s]
+    for username, files, qual in candidates[:8]:
+        payload = [{"filename": f["filename"], "size": f.get("size", 0)} for f in files]
         try:
-            # Snapshot existing folders before queuing so we can diff later
             try:
                 existing = set(e.name for e in os.scandir(DOWNLOADS_PATH) if e.is_dir())
             except Exception:
                 existing = set()
             slskd(f"/transfers/downloads/{urllib.parse.quote(username)}", "POST", payload)
-            qual = "320kbps" if is320 else f"{int(avg)}kbps"
             log.info("Queued %d/%d tracks from %s (%s) — %s – %s",
-                     len(mp3s), expected, username, qual, artist, album)
+                     len(files), expected, username, qual, artist, album)
             set_grab(lidarr_id, artist, album, "downloading",
-                     source=username, files=[f["filename"] for f in mp3s],
+                     source=username, files=[f["filename"] for f in files],
                      dl_started=time.time(), known_folders=list(existing))
             return
         except urllib.error.HTTPError as e:
@@ -367,9 +383,9 @@ def process_commands():
 # ── download monitor ──────────────────────────────────────────────────────────
 
 def _check_format(folder_path):
-    """Return (ok, reason). Rejects FLAC/WAV/AIFF and sub-MIN_MP3_BITRATE MP3."""
+    """Return (ok, reason). Rejects WAV/AIFF; allows FLAC as fallback."""
     from mutagen import File as MutagenFile
-    REJECT_EXTS = {".flac", ".wav", ".aiff"}
+    REJECT_EXTS = {".wav", ".aiff"}
     AUDIO_EXTS  = {".mp3", ".m4a", ".flac", ".wav", ".ogg", ".aiff"}
     try:
         names = os.listdir(folder_path)
@@ -813,7 +829,7 @@ def import_folder(lidarr_id, artist, album, dl_folder):
     # Move all audio files from download folder to dest
     moved = 0
     for fname in os.listdir(dl_folder):
-        if fname.lower().endswith((".mp3", ".m4a", ".ogg")):
+        if fname.lower().endswith((".mp3", ".m4a", ".ogg", ".flac")):
             shutil.move(os.path.join(dl_folder, fname), os.path.join(dest, fname))
             moved += 1
 
@@ -1303,7 +1319,7 @@ def sweep_manual_downloads():
         try:
             audio_files = [
                 f for f in os.listdir(folder_path)
-                if f.lower().endswith((".mp3", ".m4a", ".ogg"))
+                if f.lower().endswith((".mp3", ".m4a", ".ogg", ".flac"))
             ]
         except Exception:
             continue
@@ -1381,7 +1397,7 @@ def sweep_manual_downloads():
 
         moved = 0
         for fname in audio_files:
-            if not fname.lower().endswith((".mp3", ".m4a", ".ogg")):
+            if not fname.lower().endswith((".mp3", ".m4a", ".ogg", ".flac")):
                 continue
             src = os.path.join(folder_path, fname)
             dst = os.path.join(dest, fname)
