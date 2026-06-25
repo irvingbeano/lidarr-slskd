@@ -1,0 +1,35 @@
+directory: /music
+library: /data/beets.db
+
+import:
+  move: yes
+  write: yes
+  log: /data/beets-import.log
+  timid: no
+  resume: no
+  autotag: yes
+  duplicate_action: skip
+  ignore: ['*.flac', '*.wav', '*.aiff']
+
+match:
+  strong_rec_thresh: 0.10
+  medium_rec_thresh: 0.25
+  distance_weights:
+    year: 0.3
+    mediums: 0.3
+    medium: 0.3
+    country: 0.1
+    label: 0.1
+
+paths:
+  default: $albumartist/$album ($year)/$track - $title
+  singleton: Singles/$artist/$title
+  comp: Compilations/$album ($year)/$track - $artist - $title
+
+replace:
+  '[\\/]': _
+  '^\.': _
+  '[\x00-\x1f]': _
+  '[<>:"\?\*\|]': _
+  '\.$': _
+  '\s+$': ''
