@@ -345,7 +345,8 @@ def process_commands():
                     alb    = lidarr(f"/album/{album_id}")
                     artist = alb.get("artist", {}).get("artistName", "")
                     title  = alb.get("title", "")
-                    if alb.get("statistics", {}).get("trackFileCount", 0) > 0:
+                    stats = alb.get("statistics", {})
+                    if stats.get("trackFileCount", 0) >= stats.get("totalTrackCount", 1):
                         log.info("Skipping AlbumSearch — already in library: %s – %s", artist, title)
                         continue
                     if artist and title:
