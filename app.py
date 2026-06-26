@@ -869,6 +869,7 @@ def import_folder(lidarr_id, artist, album, dl_folder):
         _normalize_genres(dest)
         _fetch_genres_lastfm(dest, artist)
         _fix_label(dest)
+        _fetch_cover_art(dest, artist, album, lidarr_id)
         _navidrome_stamp_created(artist, album)
 
     return moved
@@ -1053,6 +1054,97 @@ def _fix_label(folder):
             log.info("Label fix: %s", out)
     except Exception as e:
         log.warning("Label fix error for %s: %s", folder, e)
+
+
+def _fetch_cover_art(dest_folder, artist, album, lidarr_id):
+    """Download cover.jpg if missing. Tries MusicBrainz CAA first, then Discogs."""
+    cover = os.path.join(dest_folder, "cover.jpg")
+    if os.path.exists(cover):
+        return
+
+    # Get MB release ID from audio file tags first
+    from mutagen import File as MutagenFile
+    AUDIO_EXTS = {".mp3", ".m4a", ".flac", ".ogg"}
+    mb_release_id = None
+    try:
+        for fname in sorted(os.listdir(dest_folder)):
+            if os.path.splitext(fname)[1].lower() in AUDIO_EXTS:
+                t = MutagenFile(os.path.join(dest_folder, fname), easy=True)
+                if t:
+                    mbid = (t.get("musicbrainz_albumid") or [""])[0].strip()
+                    if mbid:
+                        mb_release_id = mbid
+                        break
+    except Exception:
+        pass
+
+    # Fall back to Lidarr's stored release ID
+    if not mb_release_id and lidarr_id:
+        try:
+            alb = lidarr(f"/album/{lidarr_id}")
+            for rel in alb.get("releases", []):
+                rid = rel.get("foreignReleaseId", "")
+                if rid:
+                    mb_release_id = rid
+                    break
+        except Exception:
+            pass
+
+    if mb_release_id:
+        try:
+            caa_req = urllib.request.Request(
+                f"https://coverartarchive.org/release/{mb_release_id}/front",
+                headers={"User-Agent": "lidarr-slskd/1.0 (gtobrien@pm.me)"},
+            )
+            with urllib.request.urlopen(caa_req, timeout=20) as r:
+                data = r.read()
+            if data:
+                with open(cover, "wb") as f:
+                    f.write(data)
+                log.info("Cover art saved from CAA for %s – %s", artist, album)
+                return
+        except Exception as e:
+            log.debug("CAA cover fetch failed for %s: %s", mb_release_id, e)
+
+    if not DISCOGS_TOKEN:
+        log.info("No cover art found for %s – %s (no Discogs token)", artist, album)
+        return
+    try:
+        params = urllib.parse.urlencode({
+            "q": f"{artist} {album}", "type": "release", "format": "album",
+        })
+        search_req = urllib.request.Request(
+            f"https://api.discogs.com/database/search?{params}",
+            headers={
+                "Authorization": f"Discogs token={DISCOGS_TOKEN}",
+                "User-Agent": "lidarr-slskd/1.0 (gtobrien@pm.me)",
+            }
+        )
+        with urllib.request.urlopen(search_req, timeout=15) as r:
+            results = json.loads(r.read()).get("results", [])
+        image_url = next(
+            (res.get("cover_image") for res in results[:5]
+             if res.get("cover_image") and "spacer" not in res.get("cover_image", "")),
+            None
+        )
+        if not image_url:
+            log.info("No Discogs cover found for %s – %s", artist, album)
+            return
+        img_req = urllib.request.Request(
+            image_url,
+            headers={
+                "Authorization": f"Discogs token={DISCOGS_TOKEN}",
+                "User-Agent": "lidarr-slskd/1.0 (gtobrien@pm.me)",
+            }
+        )
+        with urllib.request.urlopen(img_req, timeout=20) as r:
+            img_data = r.read()
+        if img_data:
+            with open(cover, "wb") as f:
+                f.write(img_data)
+            log.info("Cover art saved from Discogs for %s – %s", artist, album)
+    except Exception as e:
+        log.warning("Discogs cover fetch failed for %s – %s: %s", artist, album, e)
 
 
 def find_new_download_folders(known_folders_json, since_epoch=None):
@@ -1438,6 +1530,7 @@ def sweep_manual_downloads():
             _normalize_genres(dest)
             _fetch_genres_lastfm(dest, artist)
             _fix_label(dest)
+            _fetch_cover_art(dest, artist, album, lidarr_id)
 
 
 # ── main ──────────────────────────────────────────────────────────────────────
