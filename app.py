@@ -1338,6 +1338,12 @@ def _evict_junk(downloads_path):
             continue
         audio = [f for f in contents if os.path.splitext(f)[1].lower() in AUDIO_EXTS]
         if len(audio) == 1:
+            try:
+                age_hours = (time.time() - entry.stat().st_mtime) / 3600
+            except Exception:
+                age_hours = 99
+            if age_hours < 2:
+                continue  # give recent single-track downloads a chance to be imported
             import shutil
             shutil.rmtree(entry.path)
             log.info("Evicted single-track orphan: %s", entry.name)
@@ -1479,14 +1485,19 @@ def sweep_manual_downloads():
 
         existing_audio = [f for f in os.listdir(dest)
                           if os.path.splitext(f)[1].lower() in {".mp3", ".m4a", ".flac", ".ogg", ".wav"}]
-        if existing_audio:
-            log.warning("Sweep: destination already has %d audio file(s) — skipping duplicate: %s",
+        existing_stems = {os.path.splitext(f)[0].lower() for f in existing_audio}
+        new_tracks = [f for f in audio_files
+                      if os.path.splitext(f)[0].lower() not in existing_stems]
+        if existing_audio and not new_tracks:
+            log.warning("Sweep: destination already has %d audio file(s), no new tracks — skipping: %s",
                         len(existing_audio), dest)
             try:
                 shutil.rmtree(folder_path)
             except Exception:
                 pass
             continue
+        if existing_audio and new_tracks:
+            log.info("Sweep: merging %d new track(s) into existing album: %s", len(new_tracks), dest)
 
         moved = 0
         for fname in audio_files:
